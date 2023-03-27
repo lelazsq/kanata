@@ -5,7 +5,7 @@ use crate::custom_action::*;
 use crate::keys::OsCode;
 
 // OsCode::KEY_MAX is the biggest OsCode
-pub const KEYS_IN_ROW: usize = OsCode::KEY_MAX as usize;
+pub const KEYS_IN_ROW: usize = 3000;
 pub const LAYER_COLUMNS: usize = 2;
 pub const MAX_LAYERS: usize = 25;
 pub const ACTUAL_NUM_LAYERS: usize = MAX_LAYERS * 2;
