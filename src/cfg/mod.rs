@@ -922,7 +922,7 @@ fn parse_action_atom(ac: &Spanned<String>, s: &ParsedState) -> Result<&'static K
         }
         "dynamic-macro-record-stop" => {
             return Ok(s.a.sref(Action::Custom(
-                s.a.sref(s.a.sref_slice(CustomAction::DynamicMacroRecordStop)),
+                s.a.sref(s.a.sref_slice(CustomAction::DynamicMacroRecordStop(0))),
             )))
         }
         _ => {}
@@ -973,8 +973,10 @@ fn parse_action_list(ac: &[SExpr], s: &ParsedState) -> Result<&'static KanataAct
         }
         "tap-hold-release-keys" => parse_tap_hold_release_keys(&ac[1..], s),
         "multi" => parse_multi(&ac[1..], s),
-        "macro" => parse_macro(&ac[1..], s),
-        "macro-release-cancel" => parse_macro_release_cancel(&ac[1..], s),
+        "macro" => parse_macro(&ac[1..], s, RepeatMacro::No),
+        "macro-repeat" => parse_macro(&ac[1..], s, RepeatMacro::Yes),
+        "macro-release-cancel" => parse_macro_release_cancel(&ac[1..], s, RepeatMacro::No),
+        "macro-repeat-release-cancel" => parse_macro_release_cancel(&ac[1..], s, RepeatMacro::Yes),
         "unicode" => parse_unicode(&ac[1..], s),
         "one-shot" | "one-shot-press" => {
             parse_one_shot(&ac[1..], s, OneShotEndConfig::EndOnFirstPress)
@@ -1015,6 +1017,7 @@ fn parse_action_list(ac: &[SExpr], s: &ParsedState) -> Result<&'static KanataAct
         "fork" => parse_fork(&ac[1..], s),
         "caps-word" => parse_caps_word(&ac[1..], s),
         "caps-word-custom" => parse_caps_word_custom(&ac[1..], s),
+        "dynamic-macro-record-stop-truncate" => parse_macro_record_stop_truncate(&ac[1..], s),
         _ => bail_expr!(&ac[0], "Unknown action type: {ac_type}"),
     }
 }
@@ -1234,8 +1237,16 @@ fn parse_multi(ac_params: &[SExpr], s: &ParsedState) -> Result<&'static KanataAc
 }
 
 const MACRO_ERR: &str = "Action macro only accepts delays, keys, chords, and chorded sub-macros";
+enum RepeatMacro {
+    Yes,
+    No,
+}
 
-fn parse_macro(ac_params: &[SExpr], s: &ParsedState) -> Result<&'static KanataAction> {
+fn parse_macro(
+    ac_params: &[SExpr],
+    s: &ParsedState,
+    repeat: RepeatMacro,
+) -> Result<&'static KanataAction> {
     if ac_params.is_empty() {
         bail!("macro expects at least one item after it")
     }
@@ -1247,16 +1258,22 @@ fn parse_macro(ac_params: &[SExpr], s: &ParsedState) -> Result<&'static KanataAc
         all_events.append(&mut events);
     }
     all_events.shrink_to_fit();
-    Ok(s.a.sref(Action::Sequence {
-        events: s.a.sref(s.a.sref(s.a.sref_vec(all_events))),
-    }))
+    match repeat {
+        RepeatMacro::No => Ok(s.a.sref(Action::Sequence {
+            events: s.a.sref(s.a.sref(s.a.sref_vec(all_events))),
+        })),
+        RepeatMacro::Yes => Ok(s.a.sref(Action::RepeatableSequence {
+            events: s.a.sref(s.a.sref(s.a.sref_vec(all_events))),
+        })),
+    }
 }
 
 fn parse_macro_release_cancel(
     ac_params: &[SExpr],
     s: &ParsedState,
+    repeat: RepeatMacro,
 ) -> Result<&'static KanataAction> {
-    let macro_action = parse_macro(ac_params, s)?;
+    let macro_action = parse_macro(ac_params, s, repeat)?;
     Ok(s.a.sref(Action::MultipleActions(s.a.sref(s.a.sref_vec(vec![
         *macro_action,
         Action::Custom(s.a.sref(s.a.sref_slice(CustomAction::CancelMacroOnRelease))),
@@ -1713,6 +1730,7 @@ fn find_chords_coords(chord_groups: &mut [ChordGroup], coord: (u8, u16), action:
         | Action::Layer(_)
         | Action::DefaultLayer(_)
         | Action::Sequence { .. }
+        | Action::RepeatableSequence { .. }
         | Action::CancelSequences
         | Action::ReleaseState(_)
         | Action::Custom(_) => {}
@@ -1760,6 +1778,7 @@ fn fill_chords(
         | Action::Layer(_)
         | Action::DefaultLayer(_)
         | Action::Sequence { .. }
+        | Action::RepeatableSequence { .. }
         | Action::CancelSequences
         | Action::ReleaseState(_)
         | Action::Custom(_) => None,
@@ -2321,7 +2340,7 @@ fn parse_caps_word(ac_params: &[SExpr], s: &ParsedState) -> Result<&'static Kana
 fn parse_caps_word_custom(ac_params: &[SExpr], s: &ParsedState) -> Result<&'static KanataAction> {
     const ERR_STR: &str = "caps-word-custom expects 3 param: <timeout> <keys-to-capitalize> <extra-non-terminal-keys>";
     if ac_params.len() != 3 {
-        bail!("{ERR_STR}\nFound {} params instead of 1", ac_params.len());
+        bail!("{ERR_STR}\nFound {} params instead of 3", ac_params.len());
     }
     let timeout = parse_non_zero_u16(&ac_params[0], s, "timeout")?;
     Ok(s.a.sref(Action::Custom(
@@ -2343,6 +2362,21 @@ fn parse_caps_word_custom(ac_params: &[SExpr], s: &ParsedState) -> Result<&'stat
             })),
         ),
     )))
+}
+
+fn parse_macro_record_stop_truncate(
+    ac_params: &[SExpr],
+    s: &ParsedState,
+) -> Result<&'static KanataAction> {
+    const ERR_STR: &str =
+        "dynamic-macro-record-stop-truncate expects 1 param: <num-keys-to-truncate>";
+    if ac_params.len() != 1 {
+        bail!("{ERR_STR}\nFound {} params instead of 1", ac_params.len());
+    }
+    let num_to_truncate = parse_u16(&ac_params[0], s, "num-keys-to-truncate")?;
+    Ok(s.a.sref(Action::Custom(s.a.sref(
+        s.a.sref_slice(CustomAction::DynamicMacroRecordStop(num_to_truncate)),
+    ))))
 }
 
 /// Creates a `KeyOutputs` from `layers::LAYERS`.
@@ -2421,6 +2455,7 @@ fn add_key_output_from_action_to_key_pos(
         | Action::Layer(_)
         | Action::DefaultLayer(_)
         | Action::Sequence { .. }
+        | Action::RepeatableSequence { .. }
         | Action::CancelSequences
         | Action::ReleaseState(_)
         | Action::Custom(_) => {}

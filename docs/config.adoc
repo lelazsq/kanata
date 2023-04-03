@@ -1254,6 +1254,19 @@ and the rest of the macro does not run.
 )
 ----
 
+There are further variants of the two `macro` actions which repeat while held.
+The repeat will only occur once all macros have completed,
+including the held macro key.
+If multiple repeating macros are being held simulaneously,
+only the most recently pressed macro will be repeated.
+
+----
+(defalias
+  mr1 (macro-repeat mltp)
+  mr2 (macro-repeat-release-cancel mltp)
+)
+----
+
 [[dynamic-macro]]
 === dynamic-macro
 <<table-of-contents,Back to ToC>>
@@ -1272,6 +1285,11 @@ the current recording will end and be saved, then a new recording with the new
 ID will begin.
 
 The action `dynamic-macro-record-stop` will stop and save any active recording.
+There is a variant of this:
+`dynamic-macro-record-stop-truncate`
+This is a list action that takes a single parameter:
+the number of key actions to remove at the end of a dynamic macro.
+This variant is useful if the macro stop button is on a different layer.
 
 The action `dynamic-macro-play` accepts one number (0-65535), which represents
 the macro ID. Activating this action will play the saved recording of physical
@@ -1293,6 +1311,7 @@ Example:
   dp1 (dynamic-macro-play 1)
   dp2 (dynamic-macro-play 2)
   dms dynamic-macro-record-stop
+  dst (dynamic-macro-record-stop-truncate 1)
 )
 ----
 
@@ -1321,6 +1340,17 @@ will be added to the active key list
 when a set of specific keys are active.
 The keys are: `a-z` and `-`, which will be outputted as `A-Z` and `_`
 respectively when using the US layout.
+
+Examples where this is helpful
+is capitalizing a single important word
+like in `IMPORTANT!`
+or defining a constant in code
+like `const P99_99_VALUE: ...`.
+This has an advantage over the regular caps lock
+because it automatically ends
+so it doesn't need to be toggled off manually,
+and it also shifts `-` to `_`
+which caps lock does not do.
 
 The `caps-word` state ends when the keyboard is idle
 for the duration of the defined timeout (1st parameter),

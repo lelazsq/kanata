@@ -399,7 +399,17 @@ impl Kanata {
         }
 
         if ms_elapsed > 0 {
-            self.last_tick = now;
+            self.last_tick = match ms_elapsed {
+                0..=10 => now,
+                // If too many ms elapsed, probably doing a tight loop of something that's quite
+                // expensive, e.g. click spamming. To avoid a growing ms_elapsed due to trying and
+                // failing to catch up, reset last_tick to the "actual now" instead the "past now"
+                // even though that means ticks will be missed - meaning there will be fewer than
+                // 1000 ticks in 1ms on average. In practice, there will already be fewer than 1000
+                // ticks in 1ms to the expensive operations, this just avoids having tens to
+                // thousands of ticks all happening as soon as the expensive operation ends.
+                _ => time::Instant::now(),
+            };
 
             // Handle layer change outside the loop. I don't see any practical scenario where it
             // would make a difference, so may as well reduce the amount of processing.
@@ -837,7 +847,7 @@ impl Kanata {
                             let mut new_recording = None;
                             match &mut self.dynamic_macro_record_state {
                                 None => {
-                                    log::debug!("starting dynamic macro {macro_id} recording");
+                                    log::info!("starting dynamic macro {macro_id} recording");
                                     self.dynamic_macro_record_state =
                                         Some(DynamicMacroRecordState {
                                             starting_macro_id: *macro_id,
@@ -876,14 +886,21 @@ impl Kanata {
                                 });
                             }
                         }
-                        CustomAction::DynamicMacroRecordStop => {
+                        CustomAction::DynamicMacroRecordStop(num_actions_to_remove) => {
                             if let Some(state) = &mut self.dynamic_macro_record_state {
-                                // remove the last item, since it's almost certainly a "macro
-                                // record stop" key press action which we don't want to keep.
+                                // remove the last item independently of `num_actions_to_remove`
+                                // since it's almost certainly a "macro record stop" key press
+                                // action which we don't want to keep.
                                 state.macro_items.remove(state.macro_items.len() - 1);
                                 log::info!(
-                                    "saving and stopping dynamic macro {} recording",
-                                    state.starting_macro_id
+                                    "saving and stopping dynamic macro {} recording with {num_actions_to_remove} actions at the end removed",
+                                    state.starting_macro_id,
+                                );
+                                state.macro_items.truncate(
+                                    state
+                                        .macro_items
+                                        .len()
+                                        .saturating_sub(*num_actions_to_remove as usize),
                                 );
                                 state.add_release_for_all_unreleased_presses();
                                 self.dynamic_macros
@@ -1330,6 +1347,12 @@ impl Kanata {
             && self.move_mouse_state_horizontal.is_none()
             && self.dynamic_macro_replay_state.is_none()
             && self.caps_word.is_none()
+            && !self
+                .layout
+                .b()
+                .states
+                .iter()
+                .any(|s| matches!(s, State::SeqCustomPending(_) | State::SeqCustomActive(_)))
     }
 }
 
