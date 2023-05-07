@@ -447,7 +447,7 @@ fn parse_cfg_raw_string(
 
     let alias_exprs = root_exprs
         .iter()
-        .filter(gen_first_atom_filter("defalias"))
+        .filter(gen_first_atom_start_filter("defalias"))
         .collect::<Vec<_>>();
     parse_aliases(&alias_exprs, s)?;
 
@@ -492,6 +492,7 @@ fn error_on_unknown_top_level_atoms(exprs: &[Spanned<Vec<SExpr>>]) -> Result<()>
             .map(|a| match a {
                 "defcfg"
                 | "defalias"
+                | "defaliasenvcond"
                 | "defsrc"
                 | "deflayer"
                 | "defoverrides"
@@ -525,6 +526,23 @@ fn gen_first_atom_filter(a: &str) -> impl Fn(&&Vec<SExpr>) -> bool {
         }
         if let SExpr::Atom(atom) = &expr[0] {
             atom.t == a
+        } else {
+            false
+        }
+    }
+}
+
+/// Return a closure that filters a root expression by the content of the first element. The
+/// closure returns true if the first element is an atom that starts with the input `a` and false
+/// otherwise.
+fn gen_first_atom_start_filter(a: &str) -> impl Fn(&&Vec<SExpr>) -> bool {
+    let a = a.to_owned();
+    move |expr| {
+        if expr.is_empty() {
+            return false;
+        }
+        if let SExpr::Atom(atom) = &expr[0] {
+            atom.t.starts_with(&a)
         } else {
             false
         }
@@ -798,25 +816,84 @@ fn parse_vars(exprs: &[&Vec<SExpr>], s: &mut ParsedState) -> Result<()> {
 /// Mutates the input `s` by storing aliases inside.
 fn parse_aliases(exprs: &[&Vec<SExpr>], s: &mut ParsedState) -> Result<()> {
     for expr in exprs {
-        let mut subexprs = check_first_expr(expr.iter(), "defalias")?;
-        // Read k-v pairs from the configuration
-        while let Some(alias_expr) = subexprs.next() {
-            let alias = match alias_expr {
-                SExpr::Atom(a) => &a.t,
-                _ => bail_expr!(
-                    alias_expr,
-                    "Alias names cannot be lists. Invalid alias: {:?}",
-                    alias_expr
-                ),
-            };
-            let action = match subexprs.next() {
-                Some(v) => v,
-                None => bail_expr!(alias_expr, "Found alias without an action - add an action"),
-            };
-            let action = parse_action(action, s)?;
-            if s.aliases.insert(alias.into(), action).is_some() {
-                bail_expr!(alias_expr, "Duplicate alias: {}", alias);
+        handle_standard_defalias(expr, s)?;
+        handle_envcond_defalias(expr, s)?;
+    }
+    Ok(())
+}
+
+fn handle_standard_defalias(expr: &[SExpr], s: &mut ParsedState) -> Result<()> {
+    let subexprs = match check_first_expr(expr.iter(), "defalias") {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
+    read_alias_name_action_pairs(subexprs, s)
+}
+
+fn handle_envcond_defalias(expr: &[SExpr], s: &mut ParsedState) -> Result<()> {
+    let mut subexprs = match check_first_expr(expr.iter(), "defaliasenvcond") {
+        Ok(exprs) => exprs,
+        Err(_) => return Ok(()),
+    };
+
+    let conderr = "defaliasenvcond must have a list with 2 strings as the first parameter:\n\
+            (<env var name> <env var value>)";
+
+    // Check that there is a list containing the environment variable name and value that
+    // determines if this defalias entry should be used. If there is no match, return early.
+    match subexprs.next() {
+        Some(expr) => {
+            let envcond = expr.list(s.vars()).ok_or_else(|| {
+                anyhow_expr!(expr, "Found a string, but expected a list.\n{conderr}")
+            })?;
+            if envcond.len() != 2 {
+                bail_expr!(expr, "List has the incorrect number of items.\n{conderr}");
             }
+            let env_var_name = envcond[0].atom(s.vars()).ok_or_else(|| {
+                anyhow_expr!(
+                    expr,
+                    "Environment variable name must be a string, not a list.\n{conderr}"
+                )
+            })?;
+            let env_var_value = envcond[1].atom(s.vars()).ok_or_else(|| {
+                anyhow_expr!(
+                    expr,
+                    "Environment variable value must be a string, not a list.\n{conderr}"
+                )
+            })?;
+            if !std::env::vars().any(|(name, value)| name == env_var_name && value == env_var_value)
+            {
+                log::info!("Did not find env var ({env_var_name} {env_var_value}), skipping associated aliases");
+                return Ok(());
+            }
+            log::info!("Found env var ({env_var_name} {env_var_value}), using associated aliases");
+        }
+        None => bail_expr!(&expr[0], "Missing a list item.\n{conderr}"),
+    };
+    read_alias_name_action_pairs(subexprs, s)
+}
+
+fn read_alias_name_action_pairs<'a>(
+    mut exprs: impl Iterator<Item = &'a SExpr>,
+    s: &mut ParsedState,
+) -> Result<()> {
+    // Read k-v pairs from the configuration
+    while let Some(alias_expr) = exprs.next() {
+        let alias = match alias_expr {
+            SExpr::Atom(a) => &a.t,
+            _ => bail_expr!(
+                alias_expr,
+                "Alias names cannot be lists. Invalid alias: {:?}",
+                alias_expr
+            ),
+        };
+        let action = match exprs.next() {
+            Some(v) => v,
+            None => bail_expr!(alias_expr, "Found alias without an action - add an action"),
+        };
+        let action = parse_action(action, s)?;
+        if s.aliases.insert(alias.into(), action).is_some() {
+            bail_expr!(alias_expr, "Duplicate alias: {}", alias);
         }
     }
     Ok(())
@@ -1009,6 +1086,7 @@ fn parse_action_list(ac: &[SExpr], s: &ParsedState) -> Result<&'static KanataAct
         "movemouse-accel-down" => parse_move_mouse_accel(&ac[1..], MoveDirection::Down, s),
         "movemouse-accel-left" => parse_move_mouse_accel(&ac[1..], MoveDirection::Left, s),
         "movemouse-accel-right" => parse_move_mouse_accel(&ac[1..], MoveDirection::Right, s),
+        "setmouse" => parse_set_mouse(&ac[1..], s),
         "dynamic-macro-record" => parse_dynamic_macro_record(&ac[1..], s),
         "dynamic-macro-play" => parse_dynamic_macro_play(&ac[1..], s),
         "arbitrary-code" => parse_arbitrary_code(&ac[1..], s),
@@ -1257,6 +1335,7 @@ fn parse_macro(
         (events, params_remainder) = parse_macro_item(params_remainder, s)?;
         all_events.append(&mut events);
     }
+    all_events.push(SequenceEvent::Complete);
     all_events.shrink_to_fit();
     match repeat {
         RepeatMacro::No => Ok(s.a.sref(Action::Sequence {
@@ -1288,9 +1367,18 @@ fn parse_macro_item<'a>(
     Vec<SequenceEvent<'static, &'static &'static [&'static CustomAction]>>,
     &'a [SExpr],
 )> {
-    if let Ok(duration) = parse_non_zero_u16(&acs[0], s, "delay") {
-        let duration = u32::from(duration);
-        return Ok((vec![SequenceEvent::Delay { duration }], &acs[1..]));
+    if let Some(a) = acs[0].atom(s.vars()) {
+        match parse_non_zero_u16(&acs[0], s, "delay") {
+            Ok(duration) => {
+                let duration = u32::from(duration);
+                return Ok((vec![SequenceEvent::Delay { duration }], &acs[1..]));
+            }
+            Err(e) => {
+                if a.chars().all(|c| c.is_ascii_digit()) {
+                    return Err(e);
+                }
+            }
+        }
     }
     match parse_action(&acs[0], s) {
         Ok(Action::KeyCode(kc)) => {
@@ -1366,6 +1454,9 @@ fn parse_mods_held_for_submacro<'a>(
         .atom(s.vars())
         .ok_or_else(|| anyhow_expr!(held_mods, "{MACRO_ERR}"))?;
     let (mod_keys, unparsed_str) = parse_mod_prefix(mods)?;
+    if mod_keys.is_empty() {
+        bail_expr!(held_mods, "{MACRO_ERR}");
+    }
     Ok((mod_keys, unparsed_str))
 }
 
@@ -2054,6 +2145,20 @@ fn parse_move_mouse_accel(
             max_distance,
         },
     )))))
+}
+
+fn parse_set_mouse(ac_params: &[SExpr], s: &ParsedState) -> Result<&'static KanataAction> {
+    if ac_params.len() != 2 {
+        bail!(
+            "movemouse-accel expects two parameters, found {}: <x> <y>",
+            ac_params.len()
+        );
+    }
+    let x = parse_u16(&ac_params[0], s, "x")?;
+    let y = parse_u16(&ac_params[1], s, "y")?;
+    Ok(s.a.sref(Action::Custom(
+        s.a.sref(s.a.sref_slice(CustomAction::SetMouse { x, y })),
+    )))
 }
 
 fn parse_dynamic_macro_record(
